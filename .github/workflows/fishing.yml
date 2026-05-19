@@ -60,28 +60,34 @@ jobs:
     steps:
       - name: Send message
         run: |
-          DAY=$(date -u +%d)
-          HOUR=$(date -u +%H)
-          MIN=$(date -u +%M)
-          MIN=$((10#$MIN))
-          HOUR_NUM=$((10#$HOUR))
-          
-          if [ "$MIN" -lt 15 ]; then
-            ROUNDED_MIN="00"
-            ROUNDED_HOUR=$(printf "%02d" $HOUR_NUM)
-          elif [ "$MIN" -lt 45 ]; then
-            ROUNDED_MIN="30"
-            ROUNDED_HOUR=$(printf "%02d" $HOUR_NUM)
+          # Ручной запуск всегда шлёт первый пост
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            KEY="MANUAL"
           else
-            ROUNDED_MIN="00"
-            ROUNDED_HOUR=$(printf "%02d" $((HOUR_NUM + 1)))
+            DAY=$(date -u +%d)
+            HOUR=$(date -u +%H)
+            MIN=$(date -u +%M)
+            MIN=$((10#$MIN))
+            HOUR_NUM=$((10#$HOUR))
+            
+            if [ "$MIN" -lt 15 ]; then
+              ROUNDED_MIN="00"
+              ROUNDED_HOUR=$(printf "%02d" $HOUR_NUM)
+            elif [ "$MIN" -lt 45 ]; then
+              ROUNDED_MIN="30"
+              ROUNDED_HOUR=$(printf "%02d" $HOUR_NUM)
+            else
+              ROUNDED_MIN="00"
+              ROUNDED_HOUR=$(printf "%02d" $((HOUR_NUM + 1)))
+            fi
+            
+            KEY="$DAY-$ROUNDED_HOUR-$ROUNDED_MIN"
           fi
           
-          KEY="$DAY-$ROUNDED_HOUR-$ROUNDED_MIN"
           echo "UTC: $(date -u). KEY: $KEY"
           
           case "$KEY" in
-            "19-18-15") MSG=$'🎣 <b>ПАЦАНЫ, ОТСЧЁТ ПОШЁЛ!</b>\n\nДо рыбалки ровно <b>62 часа</b>\n\nЧерви уже пакуют чемоданы 🪱\nНервничают, суетятся.\n\n<i>Поехали 🚗💨</i>' ;;
+            "MANUAL"|"19-18-00"|"19-18-15"|"19-18-30") MSG=$'🎣 <b>ПАЦАНЫ, ОТСЧЁТ ПОШЁЛ!</b>\n\nДо рыбалки ровно <b>62 часа</b>\n\nЧерви уже пакуют чемоданы 🪱\nНервничают, суетятся.\n\n<i>Поехали 🚗💨</i>' ;;
             "19-19-00") MSG=$'🌙 <b>22:00. 61 час до выезда</b>\n\nПоследний пост на сегодня.\nИди спать, баран —\nзавтра ещё работать 😴\n\n<i>Бот тоже отдыхает до 9 утра</i>' ;;
             "20-06-00") MSG=$'☀️ <b>09:00. Доброе утро, мужики!</b>\n\n⏳ До выезда 50 часов\n\n🐟 Щука уже не спит —\nсмотрит на дверь и матерится' ;;
             "20-07-00") MSG=$'☕ <b>10:00. 49 часов</b>\n\nКофе пьём,\nна работу едем,\nмыслями уже на берегу 🎣' ;;
