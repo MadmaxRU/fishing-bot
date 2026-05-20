@@ -2,59 +2,102 @@ name: Fishing Countdown
 
 on:
   schedule:
-    # Перечисляю минуты явно (не через */N) — некоторые баги GitHub связаны со звёздочкой
-    - cron: '0,5,10,15,20,25,30,35,40,45,50,55 * * * *'
-  workflow_dispatch:
-  push:
-    branches:
-      - main
+    # GitHub Actions может запускать schedule с задержкой.
+    # Поэтому ставим не :00/:30, а :07/:37 и внутри считаем нужный слот.
+    - cron: '7 10-22 20 5 *'
+      timezone: Europe/Moscow
+    - cron: '7 9-22 21 5 *'
+      timezone: Europe/Moscow
+    - cron: '7 9-11,15-20 22 5 *'
+      timezone: Europe/Moscow
+    - cron: '37 11,15-19 22 5 *'
+      timezone: Europe/Moscow
 
-# Минимальные права — нужны только для чтения репо
+  workflow_dispatch:
+    inputs:
+      slot:
+        description: 'Например: 2026-05-20_10:00'
+        required: false
+        type: string
+
 permissions:
   contents: read
+
+concurrency:
+  group: fishing-countdown
+  cancel-in-progress: false
 
 jobs:
   send:
     runs-on: ubuntu-latest
-    # Таймаут на всякий случай, чтобы не висели задачи
     timeout-minutes: 2
-    
+
     steps:
       - name: Send post to Telegram
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SCHEDULE: ${{ github.event.schedule || '' }}
+          MANUAL_SLOT: ${{ github.event.inputs.slot || '' }}
         run: |
-          set -e
-          
-          # === ВРЕМЯ В МСК ===
-          DATE=$(TZ='Europe/Moscow' date '+%Y-%m-%d')
-          HOUR=$(TZ='Europe/Moscow' date '+%H')
-          MIN=$(TZ='Europe/Moscow' date '+%M')
-          MIN=$((10#$MIN))
-          
-          echo "================================"
-          echo "Now MSK: $DATE ${HOUR}:${MIN}"
-          echo "Trigger: ${{ github.event_name }}"
-          echo "================================"
-          
-          # === ОПРЕДЕЛЯЕМ СЛОТ ===
-          # Окно :00–:14 → шлём пост за HH:00 (широкое окно на случай опозданий GitHub)
-          # Окно :30–:44 → шлём пост за HH:30
-          # Вне окон — молчим
-          if [ "$MIN" -le 14 ]; then
-            SLOT="${HOUR}:00"
-          elif [ "$MIN" -ge 30 ] && [ "$MIN" -le 44 ]; then
-            SLOT="${HOUR}:30"
-          else
-            echo "Outside send window (min=$MIN), skipping"
-            exit 0
+          set -Eeuo pipefail
+
+          TZ_NAME='Europe/Moscow'
+
+          if [ -z "${TG_TOKEN}" ] || [ -z "${TG_CHAT_ID}" ]; then
+            echo "TG_TOKEN or TG_CHAT_ID is empty"
+            exit 1
           fi
-          
-          KEY="${DATE}_${SLOT}"
+
+          DATE=$(TZ="$TZ_NAME" date '+%Y-%m-%d')
+          HOUR=$(TZ="$TZ_NAME" date '+%H')
+          MIN=$(TZ="$TZ_NAME" date '+%M')
+          MIN=$((10#$MIN))
+
+          echo "================================"
+          printf 'Now MSK: %s %s:%02d\n' "$DATE" "$HOUR" "$MIN"
+          echo "Trigger: $EVENT_NAME"
+          echo "Schedule: ${EVENT_SCHEDULE:-manual}"
+          echo "================================"
+
+          if [ -n "$MANUAL_SLOT" ]; then
+            KEY="$MANUAL_SLOT"
+          elif [ "$EVENT_NAME" = "schedule" ]; then
+            case "$EVENT_SCHEDULE" in
+              7\ *)
+                SCHEDULE_MIN=7
+                SLOT_MIN='00'
+                ;;
+              37\ *)
+                SCHEDULE_MIN=37
+                SLOT_MIN='30'
+                ;;
+              *)
+                echo "Unknown schedule: $EVENT_SCHEDULE"
+                exit 0
+                ;;
+            esac
+
+            if [ "$MIN" -lt "$SCHEDULE_MIN" ]; then
+              TARGET_DATE=$(TZ="$TZ_NAME" date -d '1 hour ago' '+%Y-%m-%d')
+              TARGET_HOUR=$(TZ="$TZ_NAME" date -d '1 hour ago' '+%H')
+            else
+              TARGET_DATE="$DATE"
+              TARGET_HOUR="$HOUR"
+            fi
+
+            KEY="${TARGET_DATE}_${TARGET_HOUR}:${SLOT_MIN}"
+          else
+            if [ "$MIN" -lt 30 ]; then
+              KEY="${DATE}_${HOUR}:00"
+            else
+              KEY="${DATE}_${HOUR}:30"
+            fi
+          fi
+
           echo "Slot key: $KEY"
-          
-          # === СООБЩЕНИЯ ПО СЛОТАМ ===
+
           MSG=""
           case "$KEY" in
             "2026-05-20_10:00") MSG=$'☕ <b>10:00. 49 часов</b>\n\nКофе пьём,\nна работу едем,\nмыслями уже на берегу 🎣' ;;
@@ -100,45 +143,45 @@ jobs:
             "2026-05-22_19:30") MSG=$'🥃 <b>Тост №9 — ПОСЛЕДНИЙ ПЕРЕД БАНЕЙ!</b>\n\nЗа то, чтобы баня\nбыла горячей, а пиво — холодным! 🔥🍺\n\n<i>До дна!</i>' ;;
             "2026-05-22_20:00") MSG=$'🔥🔥🔥 <b>БАНЯ ГОТОВА!</b> 🔥🔥🔥\n\n<b>ПОШЛИ ВСЕ В БАНЮ!</b>\n\n🧖‍♂️🧖‍♂️🧖‍♂️\n\n<i>С лёгким паром, мужики!</i> 🍺' ;;
           esac
-          
+
           if [ -z "$MSG" ]; then
             echo "No message for $KEY, skipping"
             exit 0
           fi
-          
-          # === ОТПРАВКА В TELEGRAM ===
-          # Делаем 3 попытки на случай если Telegram временно недоступен
+
           ATTEMPTS=0
           MAX_ATTEMPTS=3
           SUCCESS=0
-          
+
           while [ "$ATTEMPTS" -lt "$MAX_ATTEMPTS" ]; do
             ATTEMPTS=$((ATTEMPTS + 1))
             echo "Attempt $ATTEMPTS of $MAX_ATTEMPTS..."
-            
-            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+
+            RESPONSE=$(curl -sS -w "\n%{http_code}" -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+              --connect-timeout 10 \
+              --max-time 20 \
               -d "chat_id=${TG_CHAT_ID}" \
               -d "parse_mode=HTML" \
               -d "disable_web_page_preview=true" \
-              --data-urlencode "text=$MSG")
-            
-            HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-            BODY=$(echo "$RESPONSE" | sed '$d')
-            
+              --data-urlencode "text=$MSG" || true)
+
+            HTTP_CODE=$(printf '%s\n' "$RESPONSE" | tail -n 1)
+            BODY=$(printf '%s\n' "$RESPONSE" | sed '$d')
+
             echo "HTTP Code: $HTTP_CODE"
             echo "Response: $BODY"
-            
+
             if [ "$HTTP_CODE" = "200" ]; then
               SUCCESS=1
-              echo "✅ Sent: $KEY"
+              echo "Sent: $KEY"
               break
-            else
-              echo "⚠️ Failed attempt $ATTEMPTS"
-              sleep 5
             fi
+
+            echo "Failed attempt $ATTEMPTS"
+            sleep 5
           done
-          
+
           if [ "$SUCCESS" -eq 0 ]; then
-            echo "❌ All attempts failed for $KEY"
+            echo "All attempts failed for $KEY"
             exit 1
           fi
