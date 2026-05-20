@@ -2,26 +2,21 @@ name: Fishing Countdown
 
 on:
   schedule:
-    # GitHub Actions может запускать schedule с задержкой.
-    # Поэтому ставим не :00/:30, а :07/:37 и внутри считаем нужный слот.
-    - cron: '7 10-22 20 5 *'
-      timezone: Europe/Moscow
-    - cron: '7 9-22 21 5 *'
-      timezone: Europe/Moscow
-    - cron: '7 9-11,15-20 22 5 *'
-      timezone: Europe/Moscow
-    - cron: '37 11,15-19 22 5 *'
-      timezone: Europe/Moscow
-
+    # GitHub Actions schedule работает в UTC. Москва = UTC+3.
+    # Будим workflow каждые 5 минут в нужные даты, а скрипт сам выбирает слот.
+    # Минуты перечислены явно и не начинаются с :00, чтобы обходить перегрузку начала часа.
+    # 20-22 мая, 06:00-19:59 UTC покрывает все нужные посты по Москве.
+    - cron: '2,7,12,17,22,27,32,37,42,47,52,57 6-19 20-22 5 *'
   workflow_dispatch:
     inputs:
       slot:
-        description: 'Например: 2026-05-20_10:00'
+        description: 'Опционально: ключ слота, например 2026-05-20_10:00'
         required: false
         type: string
 
 permissions:
   contents: read
+  actions: write
 
 concurrency:
   group: fishing-countdown
@@ -30,70 +25,125 @@ concurrency:
 jobs:
   send:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 5
 
     steps:
-      - name: Send post to Telegram
+      - name: Calculate slot
+        id: slot
         env:
-          TG_TOKEN: ${{ secrets.TG_TOKEN }}
-          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           EVENT_NAME: ${{ github.event_name }}
-          EVENT_SCHEDULE: ${{ github.event.schedule || '' }}
           MANUAL_SLOT: ${{ github.event.inputs.slot || '' }}
         run: |
           set -Eeuo pipefail
 
           TZ_NAME='Europe/Moscow'
+          NOW=$(TZ="$TZ_NAME" date '+%s')
+          NOW_HUMAN=$(TZ="$TZ_NAME" date '+%Y-%m-%d %H:%M:%S')
+          KEY=""
+
+          echo "Now MSK: $NOW_HUMAN"
+          echo "Trigger: $EVENT_NAME"
+
+          if [ -n "$MANUAL_SLOT" ]; then
+            KEY="$MANUAL_SLOT"
+          else
+            # Берём последний слот, который уже наступил, но не старше 55 минут.
+            while read -r SLOT_DATE SLOT_TIME; do
+              [ -z "$SLOT_DATE" ] && continue
+
+              SLOT_TS=$(TZ="$TZ_NAME" date -d "$SLOT_DATE $SLOT_TIME" '+%s')
+              SEND_FROM=$((SLOT_TS + 5 * 60))
+              SEND_UNTIL=$((SLOT_TS + 55 * 60))
+
+              if [ "$NOW" -ge "$SEND_FROM" ] && [ "$NOW" -le "$SEND_UNTIL" ]; then
+                KEY="${SLOT_DATE}_${SLOT_TIME}"
+              fi
+            done <<'SLOTS'
+          2026-05-20 10:00
+          2026-05-20 11:00
+          2026-05-20 12:00
+          2026-05-20 13:00
+          2026-05-20 14:00
+          2026-05-20 15:00
+          2026-05-20 16:00
+          2026-05-20 17:00
+          2026-05-20 18:00
+          2026-05-20 19:00
+          2026-05-20 20:00
+          2026-05-20 21:00
+          2026-05-20 22:00
+          2026-05-21 09:00
+          2026-05-21 10:00
+          2026-05-21 11:00
+          2026-05-21 12:00
+          2026-05-21 13:00
+          2026-05-21 14:00
+          2026-05-21 15:00
+          2026-05-21 16:00
+          2026-05-21 17:00
+          2026-05-21 18:00
+          2026-05-21 19:00
+          2026-05-21 20:00
+          2026-05-21 21:00
+          2026-05-21 22:00
+          2026-05-22 09:00
+          2026-05-22 10:00
+          2026-05-22 11:00
+          2026-05-22 11:30
+          2026-05-22 15:00
+          2026-05-22 15:30
+          2026-05-22 16:00
+          2026-05-22 16:30
+          2026-05-22 17:00
+          2026-05-22 17:30
+          2026-05-22 18:00
+          2026-05-22 18:30
+          2026-05-22 19:00
+          2026-05-22 19:30
+          2026-05-22 20:00
+          SLOTS
+          fi
+
+          if [ -z "$KEY" ]; then
+            echo "No due slot now"
+            echo "key=" >> "$GITHUB_OUTPUT"
+            echo "safe_key=" >> "$GITHUB_OUTPUT"
+            echo "cache_key=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          SAFE_KEY="${KEY//:/-}"
+          echo "Slot key: $KEY"
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+          echo "safe_key=$SAFE_KEY" >> "$GITHUB_OUTPUT"
+          echo "cache_key=fishing-sent-$SAFE_KEY" >> "$GITHUB_OUTPUT"
+
+      - name: Restore sent marker
+        id: sent-cache
+        if: steps.slot.outputs.key != ''
+        uses: actions/cache/restore@v4
+        with:
+          path: .fishing-sent
+          key: ${{ steps.slot.outputs.cache_key }}
+
+      - name: Skip already sent slot
+        if: steps.slot.outputs.key != '' && steps.sent-cache.outputs.cache-hit == 'true'
+        run: echo "Already sent ${{ steps.slot.outputs.key }}, skipping"
+
+      - name: Send post to Telegram
+        id: send
+        if: steps.slot.outputs.key != '' && steps.sent-cache.outputs.cache-hit != 'true'
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          KEY: ${{ steps.slot.outputs.key }}
+          SAFE_KEY: ${{ steps.slot.outputs.safe_key }}
+        run: |
+          set -Eeuo pipefail
 
           if [ -z "${TG_TOKEN}" ] || [ -z "${TG_CHAT_ID}" ]; then
             echo "TG_TOKEN or TG_CHAT_ID is empty"
             exit 1
-          fi
-
-          DATE=$(TZ="$TZ_NAME" date '+%Y-%m-%d')
-          HOUR=$(TZ="$TZ_NAME" date '+%H')
-          MIN=$(TZ="$TZ_NAME" date '+%M')
-          MIN=$((10#$MIN))
-
-          echo "================================"
-          printf 'Now MSK: %s %s:%02d\n' "$DATE" "$HOUR" "$MIN"
-          echo "Trigger: $EVENT_NAME"
-          echo "Schedule: ${EVENT_SCHEDULE:-manual}"
-          echo "================================"
-
-          if [ -n "$MANUAL_SLOT" ]; then
-            KEY="$MANUAL_SLOT"
-          elif [ "$EVENT_NAME" = "schedule" ]; then
-            case "$EVENT_SCHEDULE" in
-              7\ *)
-                SCHEDULE_MIN=7
-                SLOT_MIN='00'
-                ;;
-              37\ *)
-                SCHEDULE_MIN=37
-                SLOT_MIN='30'
-                ;;
-              *)
-                echo "Unknown schedule: $EVENT_SCHEDULE"
-                exit 0
-                ;;
-            esac
-
-            if [ "$MIN" -lt "$SCHEDULE_MIN" ]; then
-              TARGET_DATE=$(TZ="$TZ_NAME" date -d '1 hour ago' '+%Y-%m-%d')
-              TARGET_HOUR=$(TZ="$TZ_NAME" date -d '1 hour ago' '+%H')
-            else
-              TARGET_DATE="$DATE"
-              TARGET_HOUR="$HOUR"
-            fi
-
-            KEY="${TARGET_DATE}_${TARGET_HOUR}:${SLOT_MIN}"
-          else
-            if [ "$MIN" -lt 30 ]; then
-              KEY="${DATE}_${HOUR}:00"
-            else
-              KEY="${DATE}_${HOUR}:30"
-            fi
           fi
 
           echo "Slot key: $KEY"
@@ -173,6 +223,8 @@ jobs:
 
             if [ "$HTTP_CODE" = "200" ]; then
               SUCCESS=1
+              mkdir -p .fishing-sent
+              printf '%s\n' "$KEY" > ".fishing-sent/$SAFE_KEY"
               echo "Sent: $KEY"
               break
             fi
@@ -185,3 +237,10 @@ jobs:
             echo "All attempts failed for $KEY"
             exit 1
           fi
+
+      - name: Save sent marker
+        if: steps.slot.outputs.key != '' && steps.sent-cache.outputs.cache-hit != 'true' && steps.send.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: .fishing-sent
+          key: ${{ steps.slot.outputs.cache_key }}
