@@ -30,6 +30,15 @@ jobs:
     timeout-minutes: 5
 
     steps:
+      - name: Restore sent state
+        id: sent-state
+        uses: actions/cache/restore@v4
+        with:
+          path: .fishing-sent
+          key: fishing-sent-state-${{ github.run_id }}
+          restore-keys: |
+            fishing-sent-state-
+
       - name: Calculate slot
         id: slot
         env:
@@ -41,24 +50,55 @@ jobs:
           TZ_NAME='Europe/Moscow'
           NOW=$(TZ="$TZ_NAME" date '+%s')
           NOW_HUMAN=$(TZ="$TZ_NAME" date '+%Y-%m-%d %H:%M:%S')
-          KEY=""
+          SENT_FILE=".fishing-sent/sent.txt"
+          DUE_FILE=".fishing-sent/due.txt"
+
+          mkdir -p .fishing-sent
+          touch "$SENT_FILE"
+
+          if [ ! -s "$SENT_FILE" ]; then
+            # Не пересылаем историю после перехода на state-файл.
+            printf '%s\n' \
+              '2026-05-20_10:00' \
+              '2026-05-20_11:00' \
+              '2026-05-20_12:00' \
+              '2026-05-20_13:00' \
+              '2026-05-20_14:00' \
+              '2026-05-20_15:00' \
+              '2026-05-20_16:00' \
+              '2026-05-20_17:00' \
+              '2026-05-20_18:00' \
+              '2026-05-20_19:00' \
+              '2026-05-20_20:00' \
+              '2026-05-20_21:00' \
+              '2026-05-20_22:00' \
+              '2026-05-21_09:00' \
+              '2026-05-21_10:00' \
+              '2026-05-21_11:00' \
+              '2026-05-21_12:00' \
+              '2026-05-21_13:00' \
+              '2026-05-21_14:00' \
+              '2026-05-21_15:00' \
+              '2026-05-21_16:00' > "$SENT_FILE"
+          fi
+
+          : > "$DUE_FILE"
 
           echo "Now MSK: $NOW_HUMAN"
           echo "Trigger: $EVENT_NAME"
 
           if [ -n "$MANUAL_SLOT" ]; then
-            KEY="$MANUAL_SLOT"
+            echo "$MANUAL_SLOT" >> "$DUE_FILE"
           else
-            # Берём последний слот, который уже наступил, но не старше 58 минут.
+            # Берём все слоты, которые уже наступили и ещё не отмечены как отправленные.
             while read -r SLOT_DATE SLOT_TIME; do
               [ -z "$SLOT_DATE" ] && continue
 
               SLOT_TS=$(TZ="$TZ_NAME" date -d "$SLOT_DATE $SLOT_TIME" '+%s')
-              SEND_FROM=$SLOT_TS
-              SEND_UNTIL=$((SLOT_TS + 58 * 60))
+              KEY="${SLOT_DATE}_${SLOT_TIME}"
 
-              if [ "$NOW" -ge "$SEND_FROM" ] && [ "$NOW" -le "$SEND_UNTIL" ]; then
-                KEY="${SLOT_DATE}_${SLOT_TIME}"
+              if [ "$NOW" -ge "$SLOT_TS" ] && ! grep -Fxq "$KEY" "$SENT_FILE"; then
+                echo "$KEY" >> "$DUE_FILE"
               fi
             done <<'SLOTS'
           2026-05-20 10:00
@@ -106,46 +146,41 @@ jobs:
           SLOTS
           fi
 
-          if [ -z "$KEY" ]; then
+          if [ ! -s "$DUE_FILE" ]; then
             echo "No due slot now"
-            echo "key=" >> "$GITHUB_OUTPUT"
-            echo "safe_key=" >> "$GITHUB_OUTPUT"
-            echo "cache_key=" >> "$GITHUB_OUTPUT"
+            echo "has_due=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          SAFE_KEY="${KEY//:/-}"
-          echo "Slot key: $KEY"
-          echo "key=$KEY" >> "$GITHUB_OUTPUT"
-          echo "safe_key=$SAFE_KEY" >> "$GITHUB_OUTPUT"
-          echo "cache_key=fishing-sent-$SAFE_KEY" >> "$GITHUB_OUTPUT"
-
-      - name: Restore sent marker
-        id: sent-cache
-        if: steps.slot.outputs.key != ''
-        uses: actions/cache/restore@v4
-        with:
-          path: .fishing-sent
-          key: ${{ steps.slot.outputs.cache_key }}
-
-      - name: Skip already sent slot
-        if: steps.slot.outputs.key != '' && steps.sent-cache.outputs.cache-hit == 'true'
-        run: echo "Already sent ${{ steps.slot.outputs.key }}, skipping"
+          echo "Due slots:"
+          cat "$DUE_FILE"
+          echo "has_due=true" >> "$GITHUB_OUTPUT"
 
       - name: Send post to Telegram
         id: send
-        if: steps.slot.outputs.key != '' && steps.sent-cache.outputs.cache-hit != 'true'
+        if: steps.slot.outputs.has_due == 'true'
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          KEY: ${{ steps.slot.outputs.key }}
-          SAFE_KEY: ${{ steps.slot.outputs.safe_key }}
+          MANUAL_SLOT: ${{ github.event.inputs.slot || '' }}
         run: |
           set -Eeuo pipefail
 
           if [ -z "${TG_TOKEN}" ] || [ -z "${TG_CHAT_ID}" ]; then
             echo "TG_TOKEN or TG_CHAT_ID is empty"
             exit 1
+          fi
+
+          SENT_FILE=".fishing-sent/sent.txt"
+          mkdir -p .fishing-sent
+          touch "$SENT_FILE"
+
+          while IFS= read -r KEY; do
+          [ -z "$KEY" ] && continue
+
+          if [ -z "$MANUAL_SLOT" ] && grep -Fxq "$KEY" "$SENT_FILE"; then
+            echo "Already sent $KEY, skipping"
+            continue
           fi
 
           echo "Slot key: $KEY"
@@ -198,7 +233,7 @@ jobs:
 
           if [ -z "$MSG" ]; then
             echo "No message for $KEY, skipping"
-            exit 0
+            continue
           fi
 
           ATTEMPTS=0
@@ -227,7 +262,7 @@ jobs:
             if [ "$HTTP_CODE" = "200" ]; then
               SUCCESS=1
               mkdir -p .fishing-sent
-              printf '%s\n' "$KEY" > ".fishing-sent/$SAFE_KEY"
+              grep -Fxq "$KEY" "$SENT_FILE" || printf '%s\n' "$KEY" >> "$SENT_FILE"
               echo "Sent: $KEY"
               break
             fi
@@ -248,9 +283,13 @@ jobs:
             exit 1
           fi
 
-      - name: Save sent marker
-        if: steps.slot.outputs.key != '' && steps.sent-cache.outputs.cache-hit != 'true' && steps.send.outcome == 'success'
+          done < .fishing-sent/due.txt
+
+          sort -u "$SENT_FILE" -o "$SENT_FILE"
+
+      - name: Save sent state
+        if: always() && steps.slot.outputs.has_due == 'true'
         uses: actions/cache/save@v4
         with:
           path: .fishing-sent
-          key: ${{ steps.slot.outputs.cache_key }}
+          key: fishing-sent-state-${{ github.run_id }}
