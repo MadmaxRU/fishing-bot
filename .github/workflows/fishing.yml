@@ -47,13 +47,13 @@ jobs:
           if [ -n "$MANUAL_SLOT" ]; then
             KEY="$MANUAL_SLOT"
           else
-            # Берём последний слот, который уже наступил, но не старше 55 минут.
+            # Берём последний слот, который уже наступил, но не старше 58 минут.
             while read -r SLOT_DATE SLOT_TIME; do
               [ -z "$SLOT_DATE" ] && continue
 
               SLOT_TS=$(TZ="$TZ_NAME" date -d "$SLOT_DATE $SLOT_TIME" '+%s')
-              SEND_FROM=$((SLOT_TS + 5 * 60))
-              SEND_UNTIL=$((SLOT_TS + 55 * 60))
+              SEND_FROM=$SLOT_TS
+              SEND_UNTIL=$((SLOT_TS + 58 * 60))
 
               if [ "$NOW" -ge "$SEND_FROM" ] && [ "$NOW" -le "$SEND_UNTIL" ]; then
                 KEY="${SLOT_DATE}_${SLOT_TIME}"
