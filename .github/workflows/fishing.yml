@@ -202,6 +202,7 @@ jobs:
           ATTEMPTS=0
           MAX_ATTEMPTS=3
           SUCCESS=0
+          CHAT_ID="$TG_CHAT_ID"
 
           while [ "$ATTEMPTS" -lt "$MAX_ATTEMPTS" ]; do
             ATTEMPTS=$((ATTEMPTS + 1))
@@ -210,7 +211,7 @@ jobs:
             RESPONSE=$(curl -sS -w "\n%{http_code}" -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
               --connect-timeout 10 \
               --max-time 20 \
-              -d "chat_id=${TG_CHAT_ID}" \
+              -d "chat_id=${CHAT_ID}" \
               -d "parse_mode=HTML" \
               -d "disable_web_page_preview=true" \
               --data-urlencode "text=$MSG" || true)
@@ -227,6 +228,13 @@ jobs:
               printf '%s\n' "$KEY" > ".fishing-sent/$SAFE_KEY"
               echo "Sent: $KEY"
               break
+            fi
+
+            MIGRATED_CHAT_ID=$(printf '%s\n' "$BODY" | sed -n 's/.*"migrate_to_chat_id":\(-\{0,1\}[0-9][0-9]*\).*/\1/p')
+            if [ -n "$MIGRATED_CHAT_ID" ]; then
+              echo "Telegram chat was migrated, retrying with migrated chat id"
+              CHAT_ID="$MIGRATED_CHAT_ID"
+              continue
             fi
 
             echo "Failed attempt $ATTEMPTS"
